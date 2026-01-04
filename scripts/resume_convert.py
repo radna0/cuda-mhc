@@ -45,7 +45,7 @@ def process_chunk(file_path, start, end, part_id, temp_dir):
                     tokens = item.get("tokens", [])
                     if tokens:
                         text = encoding.decode(tokens)
-                        conv_list = [{"role": "user", "content": text, "channel": "final", "reasoning_content": ""}]
+                        conv_list = [{"role": "user", "content": text, "channel": "final"}]
                     else:
                         conv_list = []
                 else:
