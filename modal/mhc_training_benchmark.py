@@ -49,15 +49,21 @@ image = (
         "/root/data": volume,
         "/root/model": model_volume
     },
-    timeout=7200,
+    ephemeral_disk=512 * 1024, # 512GB minimum as per Modal requirement
     secrets=[modal.Secret.from_dict({
         "WANDB_API_KEY": "25cca6253942b7651bf7942122a976af7d5449b2",
         "HF_HUB_READ_TIMEOUT": "120",
         "HF_HUB_ENABLE_HF_TRANSFER": "1"
     })],
 )
-def run_benchmark(mhc_enabled: bool = False, max_steps: int = 20):
+def run_benchmark(mhc_enabled: bool = False, max_steps: int = 500):
     import torch
+    import os
+    
+    # Redirect HF cache to persistent volume or large ephemeral disk
+    os.environ["HF_HOME"] = "/root/data/cache"
+    os.environ["HF_DATASETS_CACHE"] = "/root/data/cache/datasets"
+    os.makedirs("/root/data/cache", exist_ok=True)
     from unsloth import FastLanguageModel
     from trl import SFTConfig, SFTTrainer
     from datasets import load_dataset

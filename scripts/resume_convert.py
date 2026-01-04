@@ -55,8 +55,7 @@ def process_chunk(file_path, start, end, part_id, temp_dir):
                         normalized_msg = {
                             "role": str(msg.get("role", "")),
                             "content": str(msg.get("content", "")),
-                            "channel": str(msg.get("channel", "final")),
-                            "reasoning_content": str(msg.get("reasoning_content", ""))
+                            "channel": str(msg.get("channel", "final"))
                         }
                         conv_list.append(normalized_msg)
                 
