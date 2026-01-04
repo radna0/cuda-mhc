@@ -11,7 +11,7 @@ TRITON_KERNELS_SRC = Path("/home/kojoe/CUDA_mhc/triton_src/python/triton_kernels
 VLLM_DRIVE_SRC = Path("/home/kojoe/CUDA_mhc/vllm") # From previous setup
 
 # Modal Setup
-app = modal.App("gpt-oss-mhc-benchmark")
+app = modal.App("gpt-oss-mhc-benchmark-v36-safe")
 
 # Volume for model weights and datasets
 volume = modal.Volume.from_name("mhc-data-volume", create_if_missing=True)
@@ -55,6 +55,7 @@ image = (
     )
     .add_local_file("/home/kojoe/CUDA_mhc/scripts/mhc_huggingface_adapter.py", remote_path="/root/mhc_huggingface_adapter.py")
     .add_local_file("/home/kojoe/CUDA_mhc/scripts/format_nemotron_harmony.py", remote_path="/root/format_nemotron_harmony.py")
+    .add_local_file("/home/kojoe/CUDA_mhc/modal/mhc_training_benchmark.py", remote_path="/root/mhc_training_benchmark.py")
     .add_local_file("/home/kojoe/CUDA_mhc/gpt_oss_config.json", remote_path="/root/gpt_oss_config.json")
 )
 
@@ -78,7 +79,7 @@ def inspect_triton_details():
 
 @app.function(
     image=image,
-    gpu="B200",  # Switch to H100 for Triton MXFP4 compatibility
+    gpu="H100",  # Switch to H100 for Triton MXFP4 compatibility
     volumes={
         "/root/data": volume,
         "/root/model": model_volume,
@@ -91,6 +92,8 @@ def inspect_triton_details():
         "HF_HUB_ENABLE_HF_TRANSFER": "1"
     })],
     timeout=7200,
+    cpu=12.0, # Reduced to avoid launch crash (32 caused CancelledError)
+    memory=65536, # 64GB RAM (128GB caused CancelledError)
 )
 def run_benchmark(mhc_enabled: bool = False, max_steps: int = 500):
     import os
@@ -142,8 +145,8 @@ def run_benchmark(mhc_enabled: bool = False, max_steps: int = 500):
 
     # 0. Output Redirection (V31)
     os.makedirs("logs", exist_ok=True) # Direct output to log file
-    log_file = "logs/mhc_benchmark_v32_restart.log"
-    print(f"Directing output to {log_file}")
+    log_filename_v37 = "logs/mhc_benchmark_v37_stability.log"
+    print(f"Directing output to {log_filename_v37}")
     import sys
     class Tee(object):
         def __init__(self, *files):
@@ -155,7 +158,7 @@ def run_benchmark(mhc_enabled: bool = False, max_steps: int = 500):
         def flush(self):
             for f in self.files:
                 f.flush()
-    f = open(log_file_path, "w")
+    f = open(log_filename_v37, "w")
     sys.stdout = Tee(sys.stdout, f)
     sys.stderr = Tee(sys.stderr, f)
 
@@ -325,8 +328,8 @@ def run_benchmark(mhc_enabled: bool = False, max_steps: int = 500):
         #     tokenizer=tokenizer,
         # )
 
-        packing_status = "Disabled" # V30
-        print(f"Initializing SFTTrainer (Packing {packing_status}, No Masking Collator)...")
+        packing_status = "Enabled" # V36
+        print(f"Initializing SFTTrainer (Packing {packing_status}, No Masking Collator, Batch Size 128, Dataloader Opts)...")
         trainer = SFTTrainer(
             model = model,
             tokenizer = tokenizer,
@@ -336,12 +339,10 @@ def run_benchmark(mhc_enabled: bool = False, max_steps: int = 500):
             max_seq_length = max_seq_length,
             callbacks = [SanityCheckCallback()],
             args = SFTConfig(
-                per_device_train_batch_size = 1, # BS1 for 65k context stability
-                gradient_accumulation_steps = 32, # effective batch 32
+                per_device_train_batch_size = 8, # OPTIMIZED: Reduce BS to fix Packing Stall
+                gradient_accumulation_steps = 16, # Increase GradAcc to maintain Effective BS=128
                 max_steps = max_steps,
                 learning_rate = 2e-5,
-                fp16 = not torch.cuda.is_bf16_supported(),
-                bf16 = torch.cuda.is_bf16_supported(),
                 logging_steps = 1,
                 optim = "adamw_8bit",
                 weight_decay = 0.001,
@@ -352,16 +353,22 @@ def run_benchmark(mhc_enabled: bool = False, max_steps: int = 500):
                 warmup_steps = 20,
                 seed = 3407,
                 output_dir = "outputs",
-                packing = False, # V32: Keep packing disabled for initial B200 stability check
+                packing = True, # Enable packing
                 report_to = "wandb",
                 save_strategy = "no",
-                run_name = f"gpt-oss-20b-benchmark-v32",
+                run_name = f"gpt-oss-20b-benchmark-v37-stability-fix",
                 max_grad_norm = 1.0,
+                # Dataloader Optimizations (User Requested + Auto-Detected)
+                dataloader_num_workers = 16,
+                dataloader_prefetch_factor = 32, # User value
+                dataloader_pin_memory = True,
+                dataloader_persistent_workers = True, # Keep workers alive
+                dataset_num_proc = 32, # Match CPU count for mapping
             ),
         )
         
         # Train
-        print(f"Starting SFT Training Benchmark v32... Output redirected to {log_file_path}")
+        print(f"Starting SFT Training Benchmark v37 (BS=8, GradAcc=16, CPU=12)... Output redirected to {log_filename_v37}")
         train_result = trainer.train()
         
         end_time = time.time()
@@ -383,10 +390,6 @@ def run_benchmark(mhc_enabled: bool = False, max_steps: int = 500):
         import traceback
         traceback.print_exc()
         return {"error": str(e)}
-
-@app.local_entrypoint()
-def debug_triton():
-    inspect_triton_details.remote()
 
 @app.local_entrypoint()
 def main():
