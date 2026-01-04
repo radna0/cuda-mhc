@@ -1,0 +1,94 @@
+{
+    "baseline": {
+        "skipped": true
+    },
+    "mhc": {
+        "mhc_enabled": true,
+        "train_runtime": 166.3409,
+        "train_loss": NaN,
+        "peak_vram_gb": 19.353515625,
+        "initial_vram_gb": 11.76953125,
+        "throughput_tokens_per_sec": null,
+        "history": [
+            {
+                "loss": 3.8893,
+                "grad_norm": 8.908811651053838e-06,
+                "learning_rate": 0.0,
+                "epoch": 0.01,
+                "step": 1
+            },
+            {
+                "loss": 4.103,
+                "grad_norm": 6.643824235652573e-06,
+                "learning_rate": 1e-05,
+                "epoch": 0.02,
+                "step": 2
+            },
+            {
+                "loss": 4.7124,
+                "grad_norm": NaN,
+                "learning_rate": 8.888888888888888e-06,
+                "epoch": 0.03,
+                "step": 3
+            },
+            {
+                "loss": NaN,
+                "grad_norm": NaN,
+                "learning_rate": 7.77777777777778e-06,
+                "epoch": 0.04,
+                "step": 4
+            },
+            {
+                "loss": NaN,
+                "grad_norm": NaN,
+                "learning_rate": 6.666666666666667e-06,
+                "epoch": 0.05,
+                "step": 5
+            },
+            {
+                "loss": NaN,
+                "grad_norm": NaN,
+                "learning_rate": 5.555555555555557e-06,
+                "epoch": 0.06,
+                "step": 6
+            },
+            {
+                "loss": NaN,
+                "grad_norm": NaN,
+                "learning_rate": 4.444444444444444e-06,
+                "epoch": 0.07,
+                "step": 7
+            },
+            {
+                "loss": NaN,
+                "grad_norm": NaN,
+                "learning_rate": 3.3333333333333333e-06,
+                "epoch": 0.08,
+                "step": 8
+            },
+            {
+                "loss": NaN,
+                "grad_norm": NaN,
+                "learning_rate": 2.222222222222222e-06,
+                "epoch": 0.09,
+                "step": 9
+            },
+            {
+                "loss": NaN,
+                "grad_norm": NaN,
+                "learning_rate": 1.111111111111111e-06,
+                "epoch": 0.1,
+                "step": 10
+            },
+            {
+                "train_runtime": 166.3409,
+                "train_samples_per_second": 0.06,
+                "train_steps_per_second": 0.06,
+                "total_flos": 234391883950080.0,
+                "train_loss": NaN,
+                "epoch": 0.1,
+                "step": 10
+            }
+        ]
+    }
+}
