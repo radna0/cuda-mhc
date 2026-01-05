@@ -126,10 +126,26 @@ def run_benchmark(mhc_enabled: bool = False, max_steps: int = 500):
     old_module_init = nn.Module.__init__
     def patched_module_init(self, *args, **kwargs):
         old_module_init(self, *args, **kwargs)
-        if "Router" in self.__class__.__name__:
+        name = self.__class__.__name__
+        if "Router" in name or "GptOss" in name:
             for target in [self] + ([self.linear] if hasattr(self, "linear") else []):
+                # Ensure weight/bias exist for Unsloth's checks initially
                 if not hasattr(target, "weight"): target.register_parameter("weight", nn.Parameter(torch.zeros(1)))
                 if not hasattr(target, "bias"): target.register_parameter("bias", nn.Parameter(torch.zeros(1)))
+                
+                # Dynamic resizing during load_state_dict
+                old_lsd = target.load_state_dict
+                def make_lsd(t, old):
+                    def lsd(state_dict, strict=True, assign=False):
+                        if "weight" in state_dict:
+                            if t.weight.shape != state_dict["weight"].shape:
+                                t.register_parameter("weight", nn.Parameter(torch.zeros_like(state_dict["weight"])))
+                        if "bias" in state_dict:
+                            if t.bias.shape != state_dict["bias"].shape:
+                                t.register_parameter("bias", nn.Parameter(torch.zeros_like(state_dict["bias"])))
+                        return old(state_dict, strict=strict, assign=assign)
+                    return lsd
+                target.load_state_dict = make_lsd(target, old_lsd)
     nn.Module.__init__ = patched_module_init
 
     # Model Load
