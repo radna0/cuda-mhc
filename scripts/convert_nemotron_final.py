@@ -6,21 +6,35 @@ import json
 import glob
 import time
 import subprocess
+from datasets import load_dataset
+from huggingface_hub import login
 
 # Configuration
 HF_TOKEN = os.environ.get("HF_TOKEN")
+SOURCE_REPO = "nvidia/Nemotron-Math-v2"
 REPO_ID = "radna0/nemotron-harmony-formatted"
 CACHE_DIR = "/dev/shm/hf_cache"
-LOCAL_DATA_DIR = "/dev/shm/nemotron_raw/data"
+LOCAL_DATA_DIR = "/dev/shm/nemotron_final"
+
+# Target splits to convert
+TARGET_SPLITS = ["high_part01", "high_part02", "medium", "low"]
+# TARGET_SPLITS = ["high_part01"] # Debug
 
 # FORCE RAM-ONLY CACHING
 os.makedirs(CACHE_DIR, exist_ok=True)
+os.makedirs(LOCAL_DATA_DIR, exist_ok=True)
 os.environ["HF_HOME"] = CACHE_DIR
 os.environ["HF_DATASETS_CACHE"] = CACHE_DIR
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
-def process_chunk(file_path, start_offset, end_offset, part_id, out_dir):
-    """Worker function with robust logging and structural Harmony output."""
+def process_and_upload_split(split_name):
+    """
+    Downloads a split in streaming mode, processes it to Harmony format, 
+    writes to JSONL, uploads to HF, and deletes the local file.
+    """
+    print(f"\n[Worker] Starting processing for split: {split_name}", flush=True)
+    
+    # Imports inside worker to avoid fork issues
     from openai_harmony import (
         HarmonyEncodingName,
         load_harmony_encoding,
@@ -28,23 +42,26 @@ def process_chunk(file_path, start_offset, end_offset, part_id, out_dir):
         Message,
         Role,
         RenderConversationConfig,
+        Author
     )
     
     try:
         encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
         config = RenderConversationConfig(auto_drop_analysis=False)
     except Exception as e:
-        print(f"Worker {part_id}: Failed to load encoding: {e}")
+        print(f"Failed to load Harmony encoding: {e}")
         return
 
+    # Updated System/Developer Prompt matching openai-harmony docs
     system_text = (
         "You are ChatGPT, a large language model trained by OpenAI.\n"
-        "Knowledge cutoff: 2024-06\n\n"
+        "Knowledge cutoff: 2024-06\n"
+        "Current date: 2025-06-28\n\n"
         "Reasoning: high\n\n"
         "# Tools\n\n"
         "## python\n\n"
         "Use this tool to execute Python code in your chain of thought. The code will not be shown to the user. This tool should be used for internal reasoning, but not for code that is intended to be visible to the user (e.g. when creating plots, tables, or files).\n"
-        "When you send a message containing Python code to python, it will be executed in a stateful Jupyter notebook environment. python will respond with the output of the execution or time out after 120.0 seconds. Internet access for this session is disabled.\n\n"
+        "When you send a message containing Python code to python, it will be executed in a stateful Jupyter notebook environment. python will respond with the output of the execution or time out after 120.0 seconds. The drive at '/mnt/data' can be used to save and persist user files. Internet access for this session is UNKNOWN. Depends on the cluster.\n\n"
         "# Valid channels: analysis, commentary, final. Channel must be included for every message."
     )
     msg_system = Message.from_role_and_content(Role.SYSTEM, system_text)
@@ -55,121 +72,150 @@ def process_chunk(file_path, start_offset, end_offset, part_id, out_dir):
     )
     msg_developer = Message.from_role_and_content(Role.DEVELOPER, developer_text)
 
-    out_file = os.path.join(out_dir, f"part_{part_id}.jsonl")
+    # 1. Download Streaming
+    print(f"[{split_name}] loading dataset (streaming)...")
+    try:
+        # Use streaming=True to bypass schema validation issues with 'tools' column
+        dataset = load_dataset(SOURCE_REPO, split=split_name, streaming=True)
+    except Exception as e:
+        print(f"[{split_name}] Failed to load dataset: {e}")
+        return
+
+    out_file = os.path.join(LOCAL_DATA_DIR, f"{split_name}.jsonl")
     count = 0
     errors = 0
     
-    with open(file_path, 'rb') as f_in, open(out_file, 'w') as f_out:
-        if start_offset > 0:
-            f_in.seek(start_offset - 1)
-            if f_in.read(1) != b'\n':
-                f_in.readline()
-        
-        while f_in.tell() < end_offset:
-            line_bytes = f_in.readline()
-            if not line_bytes:
-                break
-            
+    print(f"[{split_name}] Writing to {out_file}...")
+    
+    with open(out_file, 'w') as f_out:
+        for item in dataset:
             try:
-                item = json.loads(line_bytes.decode('utf-8'))
                 msgs_raw = item.get("messages", [])
                 if len(msgs_raw) < 2:
                     continue
-                
-                problem = msgs_raw[0].get("content", "")
-                reasoning = msgs_raw[1].get("reasoning_content", "")
-                answer = msgs_raw[1].get("content", "")
 
-                if not problem or not answer:
-                    continue
-
-                msg_user = Message.from_role_and_content(Role.USER, problem)
-                msgs = [msg_system, msg_developer, msg_user]
+                # --- HARMONY MESSAGE CONSTRUCTION ---
+                msgs = [msg_system, msg_developer]
                 
-                if reasoning and reasoning.strip():
-                    msgs.append(Message.from_role_and_content(Role.ASSISTANT, reasoning.strip()).with_channel("analysis"))
+                # Iterate through all messages in the conversation
+                for m in msgs_raw:
+                    role = m.get("role")
+                    content = m.get("content")
+                    tool_calls = m.get("tool_calls")
                     
-                msgs.append(Message.from_role_and_content(Role.ASSISTANT, answer.strip()).with_channel("final"))
-                
-                convo = Conversation.from_messages(msgs)
-                tokens = encoding.render_conversation_for_training(convo, config=config)
-                
-                convo = Conversation.from_messages(msgs)
-                tokens = encoding.render_conversation_for_training(convo, config=config)
-                
-                # Structural output for masking (conversations column)
-                # Use original string content to avoid TextContent serialization issues
-                conv_list = [
-                    {"role": "system", "content": system_text},
-                    {"role": "developer", "content": developer_text},
-                    {"role": "user", "content": problem}
-                ]
-                if reasoning and reasoning.strip():
-                    conv_list.append({"role": "assistant", "channel": "analysis", "content": reasoning.strip()})
-                conv_list.append({"role": "assistant", "channel": "final", "content": answer.strip()})
+                    if role == "user":
+                        msgs.append(Message.from_role_and_content(Role.USER, content))
+                    
+                    elif role == "assistant":
+                        # Assistant can have text, reasoning, and tool calls
+                        reasoning = m.get("reasoning_content")
+                        
+                        # 1. Reasoning Output (Analysis)
+                        if reasoning and reasoning.strip():
+                            msgs.append(Message.from_role_and_content(
+                                Role.ASSISTANT, 
+                                reasoning.strip()
+                            ).with_channel("analysis"))
+                        
+                        # 2. Tool Calls (Analysis channel, recipient=python)
+                        if tool_calls:
+                            for tc in tool_calls:
+                                func = tc.get("function", {})
+                                name = func.get("name")
+                                args_str = func.get("arguments", "{}")
+                                try:
+                                    args = json.loads(args_str)
+                                    code = args.get("code", "")
+                                except:
+                                    code = args_str # Fallback
+                                
+                                if name == "stateful_python_code_exec" or name == "python":
+                                    msgs.append(Message.from_role_and_content(
+                                        Role.ASSISTANT, 
+                                        code
+                                    ).with_channel("analysis").with_recipient("python"))
 
+                        # 3. Content (Final or Analysis)
+                        # If content exists and NOT accompanied by tool calls (or even if it is)
+                        # Nemotron usually has content as final answer on last turn.
+                        if content:
+                            # Heuristic: If last message, Final. Else Analysis.
+                            # But here we are iterating. We don't know if it's last strictly without lookahead.
+                            # However, in Nemotron, intermediate text is usually reasoning (handled above) 
+                            # or just part of the chain. 
+                            # If we put it in 'final', it stops generation? No.
+                            # Safer to put in 'analysis' unless we are sure.
+                            # BUT, for the VERY LAST message, we want 'final'.
+                            
+                            is_last = (m == msgs_raw[-1])
+                            channel = "final" if is_last else "analysis"
+                            
+                            # However, if tool calls are present, content might be empty or preamble.
+                            if not tool_calls:
+                                msgs.append(Message.from_role_and_content(
+                                    Role.ASSISTANT, 
+                                    content.strip()
+                                ).with_channel(channel))
+                            
+                    elif role == "tool":
+                        # Tool Output -> Role.TOOL
+                        # recipient? 'python' usually means it comes FROM python or TO python?
+                        # Docs: Author.new(Role.TOOL, "functions.get_current_weather")
+                        # We use 'python'
+                        msgs.append(Message.from_author_and_content(
+                            Author.new(Role.TOOL, "python"),
+                            content
+                        ).with_channel("analysis")) 
+                        # Docs say "commentary" for functions, but python tool is usually analysis flow?
+                        # Sample uses 'analysis' for python request, then output?
+                        # Actually docs say: "python will respond...". 
+                        # Tools generally respond to the same channel? 
+                        # Let's use 'analysis' for robust CoT.
+
+                convo = Conversation.from_messages(msgs)
+                tokens = encoding.render_conversation_for_training(convo, config=config)
+                
+                # Create 'conversations' list for pure transparency/debugging (optional, but good for structured dataset)
+                # Omitted here to save space, we just need 'text'.
+                
                 f_out.write(json.dumps({
-                    "text": encoding.decode(tokens),
-                    "conversations": conv_list
+                    "text": encoding.decode(tokens)
                 }) + "\n")
+                
                 count += 1
-                if count % 100 == 0:
-                    f_out.flush()
+                if count % 1000 == 0:
+                    print(f"[{split_name}] Processed {count} items...", flush=True)
+
             except Exception as e:
                 errors += 1
                 if errors < 10:
-                    print(f"Worker {part_id} error processing item: {e}")
-                    import traceback
-                    traceback.print_exc()
+                    print(f"[{split_name}] Error processing item: {e}")
                 continue
 
-    if count > 0:
-        print(f"Worker {part_id} finished: {count} items, {errors} errors.")
+    print(f"[{split_name}] Finished writing {count} items. Uploading to Hub...")
+    
+    # 2. Upload
+    dataset_processed = load_dataset("json", data_files=out_file, split="train")
+    dataset_processed.push_to_hub(REPO_ID, split=split_name, private=False)
+    print(f"[{split_name}] Uploaded successfully.")
+    
+    # 3. Cleanup
+    os.remove(out_file)
+    print(f"[{split_name}] Local file deleted.")
+
 
 def main():
-    from huggingface_hub import login
-    from datasets import load_dataset
+    print("Turbo Conversion: FULL HARMONY + STREAMING (V2)", flush=True)
+    if HF_TOKEN:
+        login(token=HF_TOKEN, add_to_git_credential=False)
     
-    print("Turbo Conversion: STRUCTURAL HARMONY VERSION", flush=True)
-    login(token=HF_TOKEN, add_to_git_credential=False)
+    # Sequential processing to manage memory/disk, or parallel?
+    # Streaming uses less disk.
+    # Parallel might saturate network.
+    # Sequential is safer for reliability.
     
-    jsonl_files = sorted(glob.glob(f"{LOCAL_DATA_DIR}/*.jsonl"))
-    num_cpus = max(1, multiprocessing.cpu_count() // 2) # Use half cores to avoid pressure
-    
-    for file_path in jsonl_files:
-        split_name = os.path.basename(file_path).replace(".jsonl", "").replace(".", "_")
-        print(f"\nProcessing {split_name}...", flush=True)
-        
-        temp_dir = f"/dev/shm/tmp_{split_name}"
-        os.makedirs(temp_dir, exist_ok=True)
-        
-        file_size = os.path.getsize(file_path)
-        chunk_size = file_size // num_cpus
-        processes = []
-        for p_id in range(num_cpus):
-            start = p_id * chunk_size
-            end = file_size if p_id == (num_cpus - 1) else (p_id+1) * chunk_size
-            p = multiprocessing.Process(target=process_chunk, args=(file_path, start, end, p_id, temp_dir))
-            p.start()
-            processes.append(p)
-        
-        for p in processes: p.join()
-        
-        part_files = sorted(glob.glob(os.path.join(temp_dir, "part_*.jsonl")))
-        valid_files = [f for f in part_files if os.path.getsize(f) > 0]
-        
-        if not valid_files:
-            print(f"FAILED: No items processed for {split_name}")
-            continue
-            
-        print(f"Loading {len(valid_files)} parts into Arrow...")
-        ds = load_dataset("json", data_files=valid_files, num_proc=os.cpu_count())["train"]
-        print(f"Pushing {len(ds)} samples to {REPO_ID} (split: {split_name})...")
-        ds.push_to_hub(REPO_ID, split=split_name, private=False)
-        
-        # Cleanup
-        for f in part_files: os.remove(f)
-        os.rmdir(temp_dir)
+    for split in TARGET_SPLITS:
+        process_and_upload_split(split)
 
 if __name__ == "__main__":
     main()
